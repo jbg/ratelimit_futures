@@ -58,11 +58,12 @@ use futures::{Async, Future, Poll};
 use futures_timer::Delay;
 use ratelimit_meter::{algorithms::Algorithm, DirectRateLimiter, NonConformance};
 use std::io;
+use std::time::Instant;
 
 /// The rate-limiter as a future.
 pub struct Ratelimit<'a, A: Algorithm>
 where
-    <A as Algorithm>::NegativeDecision: NonConformance,
+    <A as Algorithm>::NegativeDecision: NonConformance<Instant>,
 {
     delay: Delay,
     limiter: &'a mut DirectRateLimiter<A>,
@@ -71,7 +72,7 @@ where
 
 impl<'a, A: Algorithm> Ratelimit<'a, A>
 where
-    <A as Algorithm>::NegativeDecision: NonConformance,
+    <A as Algorithm>::NegativeDecision: NonConformance<Instant>,
 {
     /// Check if the rate-limiter would allow a request through.
     fn check(&mut self) -> Result<(), ()> {
@@ -98,7 +99,7 @@ where
 
 impl<'a, A: Algorithm> Future for Ratelimit<'a, A>
 where
-    <A as Algorithm>::NegativeDecision: NonConformance,
+    <A as Algorithm>::NegativeDecision: NonConformance<Instant>,
 {
     type Item = ();
     type Error = io::Error;
