@@ -12,31 +12,21 @@
 //! actual work that you mean to perform:
 //!
 //! ```rust
-//! # extern crate ratelimit_meter;
-//! # extern crate ratelimit_futures;
-//! # extern crate futures;
-//! use futures::prelude::*;
-//! use futures::future::{self, FutureResult};
+//! use std::num::NonZeroU32;
+//!
 //! use ratelimit_meter::{DirectRateLimiter, LeakyBucket};
 //! use ratelimit_futures::Ratelimit;
-//! use std::num::NonZeroU32;
+//!
 //!
 //! let mut lim = DirectRateLimiter::<LeakyBucket>::per_second(NonZeroU32::new(1).unwrap());
 //! {
 //!     let mut lim = lim.clone();
-//!     let ratelimit_future = Ratelimit::new(&mut lim);
-//!     let future_of_3 = ratelimit_future.and_then(|_| {
-//!         Ok(3)
-//!     });
+//!     Ratelimit::new(&mut lim).await?;
 //! }
 //! {
 //!     let mut lim = lim.clone();
-//!     let ratelimit_future = Ratelimit::new(&mut lim);
-//!     let future_of_4 = ratelimit_future.and_then(|_| {
-//!         Ok(4)
-//!     });
+//!     Ratelimit::new(&mut lim).await?;
 //! }
-//! // 1 second will pass before both futures resolve.
 //! ```
 //!
 //! In this example, we're constructing futures that can each start work
@@ -45,7 +35,6 @@
 //! You can probably guess the mechanics of using these rate-limiting
 //! futures:
 //!
-//! * Chain your work to them using `.and_then`.
 //! * Construct and a single rate limiter for the work that needs to count
 //!   against that rate limit. You can share them using their `Clone`
 //!   trait.
@@ -54,25 +43,35 @@
 //!   already allowed another piece of code to proceed, the wait time will
 //!   be extended.
 
-use futures::{Async, Future, Poll};
+
+use std::{
+    future::Future,
+    pin::Pin,
+    task::Poll,
+    time::Instant,
+};
+
 use futures_timer::Delay;
-use ratelimit_meter::{algorithms::Algorithm, DirectRateLimiter, NonConformance};
-use std::io;
-use std::time::Instant;
+use ratelimit_meter::{
+    algorithms::Algorithm,
+    DirectRateLimiter,
+    NonConformance,
+};
+
 
 /// The rate-limiter as a future.
-pub struct Ratelimit<'a, A: Algorithm>
+pub struct Ratelimit<'a, A: Algorithm<Instant>>
 where
-    <A as Algorithm>::NegativeDecision: NonConformance<Instant>,
+    <A as Algorithm>::NegativeDecision: NonConformance,
 {
-    delay: Delay,
+    delay: Pin<Box<Delay>>,
     limiter: &'a mut DirectRateLimiter<A>,
     first_time: bool,
 }
 
-impl<'a, A: Algorithm> Ratelimit<'a, A>
+impl<'a, A: Algorithm<Instant>> Ratelimit<'a, A>
 where
-    <A as Algorithm>::NegativeDecision: NonConformance<Instant>,
+    <A as Algorithm>::NegativeDecision: NonConformance,
 {
     /// Check if the rate-limiter would allow a request through.
     fn check(&mut self) -> Result<(), ()> {
@@ -80,7 +79,7 @@ where
             Ok(()) => Ok(()),
             Err(nc) => {
                 let earliest = nc.earliest_possible();
-                self.delay.reset_at(earliest);
+                self.delay.reset(earliest);
                 Err(())
             }
         }
@@ -90,45 +89,38 @@ where
     /// rate limiter allows it.
     pub fn new(limiter: &'a mut DirectRateLimiter<A>) -> Self {
         Ratelimit {
-            delay: Delay::new(Default::default()),
+            delay: Box::pin(Delay::new(Default::default())),
             first_time: true,
             limiter,
         }
     }
 }
 
-impl<'a, A: Algorithm> Future for Ratelimit<'a, A>
+impl<'a, A: Algorithm<Instant>> Future for Ratelimit<'a, A>
 where
-    <A as Algorithm>::NegativeDecision: NonConformance<Instant>,
+    <A as Algorithm>::NegativeDecision: NonConformance,
 {
-    type Item = ();
-    type Error = io::Error;
+    type Output = ();
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         if self.first_time {
             // First time we run, let's check the rate-limiter and set
             // up a delay if we can't proceed:
             self.first_time = false;
             if self.check().is_ok() {
-                return Ok(Async::Ready(()));
+                return Poll::Ready(());
             }
         }
-        match self.delay.poll() {
+        match self.delay.as_mut().poll(cx) {
             // Timer says we should check the rate-limiter again, do
             // it and reset the delay otherwise.
-            Ok(Async::Ready(_)) => match self.check() {
-                Ok(_) => Ok(Async::Ready(())),
-                Err(_) => {
-                    self.delay.poll()?;
-                    Ok(Async::NotReady)
-                }
+            Poll::Ready(_) => match self.check() {
+                Ok(_) => Poll::Ready(()),
+                Err(_) => Poll::Pending,
             },
 
             // timer isn't yet ready, let's wait:
-            Ok(Async::NotReady) => Ok(Async::NotReady),
-
-            // something went wrong:
-            Err(e) => Err(e),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
