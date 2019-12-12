@@ -47,7 +47,6 @@
 //!   be extended.
 
 use std::{
-    io,
     future::Future,
     pin::Pin,
     task::{Context, Poll},
@@ -98,7 +97,7 @@ impl<'a, A: Algorithm<Instant>, C: Clock<Instant = Instant>> Future for Ratelimi
 where
     <A as Algorithm>::NegativeDecision: NonConformance,
 {
-    type Output = Result<(), io::Error>;
+    type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         if self.first_time {
@@ -106,14 +105,14 @@ where
             // up a delay if we can't proceed:
             self.first_time = false;
             if self.check().is_ok() {
-                return Poll::Ready(Ok(()));
+                return Poll::Ready(());
             }
         }
         match self.delay.as_mut().poll(cx) {
             // Timer says we should check the rate-limiter again, do
             // it and reset the delay otherwise.
             Poll::Ready(_) => match self.check() {
-                Ok(_) => Poll::Ready(Ok(())),
+                Ok(_) => Poll::Ready(()),
                 Err(_) => {
                     self.delay.as_mut().poll(cx);  // why is this here?
                     Poll::Pending
